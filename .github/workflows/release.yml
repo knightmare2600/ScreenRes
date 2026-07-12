@@ -21,7 +21,12 @@ permissions:
 jobs:
   build:
     name: Build (${{ matrix.platform }})
-    runs-on: windows-latest
+    # Pinned, not windows-latest: GitHub moved windows-latest to the
+    # Visual Studio 2026 image in June 2026, which drops the v143
+    # (VS2022) toolset for ARM64 — see actions/runner-images#14215.
+    # windows-2022 is the last image confirmed to ship v143 for both
+    # x64 and ARM64, matching this project's PlatformToolset=v143.
+    runs-on: windows-2022
     strategy:
       fail-fast: false
       matrix:
@@ -44,7 +49,7 @@ jobs:
         run: msbuild screenres.sln /m /p:Configuration=Release /p:Platform=${{ matrix.platform }} /p:PlatformToolset=v143
 
       # MSVC cross-compiles ARM64 from the x64 host using the
-      # VC.Tools.ARM64 component (preinstalled on windows-latest) — the
+      # VC.Tools.ARM64 component (preinstalled on windows-2022) — the
       # result is a genuine native ARM64 PE, not an x64 binary and not a
       # multi-arch/"fat" bundle. Verify the PE Machine field directly
       # rather than trusting the matrix label.
