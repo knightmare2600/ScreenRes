@@ -1,0 +1,107 @@
+name: Release
+
+# On demand only — never fires on push/PR. Trigger from the Actions tab
+# ("Run workflow") or via `gh workflow run release.yml -f version=vX.Y.Z`.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag (e.g. v1.3.0)"
+        required: true
+        type: string
+      draft:
+        description: "Create as a draft release"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [x64, ARM64]
+        include:
+          - platform: x64
+            artifact_name: screenres-amd64
+            expected_machine: "0x8664"
+          - platform: ARM64
+            artifact_name: screenres-arm64
+            expected_machine: "0xAA64"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build ${{ matrix.platform }} Release
+        run: msbuild screenres.sln /m /p:Configuration=Release /p:Platform=${{ matrix.platform }} /p:PlatformToolset=v143
+
+      # MSVC cross-compiles ARM64 from the x64 host using the
+      # VC.Tools.ARM64 component (preinstalled on windows-latest) — the
+      # result is a genuine native ARM64 PE, not an x64 binary and not a
+      # multi-arch/"fat" bundle. Verify the PE Machine field directly
+      # rather than trusting the matrix label.
+      - name: Verify native architecture
+        shell: pwsh
+        run: |
+          $exe = "${{ matrix.platform }}\Release\screenres.exe"
+          if (-not (Test-Path $exe)) { throw "Expected binary not found at $exe" }
+          $bytes = [System.IO.File]::ReadAllBytes($exe)
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+          $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+          $machineHex = "0x{0:X4}" -f $machine
+          Write-Host "Binary: $exe"
+          Write-Host "PE Machine field: $machineHex"
+          if ($machineHex -ne "${{ matrix.expected_machine }}") {
+            throw "Expected machine type ${{ matrix.expected_machine }} for ${{ matrix.platform }} but got $machineHex"
+          }
+
+      - name: Stage artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path stage -Force | Out-Null
+          Copy-Item "${{ matrix.platform }}\Release\screenres.exe" "stage\${{ matrix.artifact_name }}.exe"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: stage\${{ matrix.artifact_name }}.exe
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum *.exe > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          name: ScreenRes ${{ inputs.version }}
+          draft: ${{ inputs.draft }}
+          generate_release_notes: true
+          files: |
+            dist/*.exe
+            dist/SHA256SUMS.txt
